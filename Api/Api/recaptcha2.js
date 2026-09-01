@@ -5,7 +5,7 @@ async function recaptchaV2({ domain, siteKey, action = "submit", isInvisible = f
     if (!domain) throw new Error("Missing domain parameter");
     if (!siteKey) throw new Error("Missing siteKey parameter");
 
-    const timeout = global.timeOut || 90000; // 90 giây mặc định
+    const timeout = 65000;
 
     return new Promise(async (resolve, reject) => {
         let isResolved = false;
@@ -13,7 +13,7 @@ async function recaptchaV2({ domain, siteKey, action = "submit", isInvisible = f
         const cl = setTimeout(() => {
             if (!isResolved) {
                 isResolved = true;
-                reject(new Error("Timeout Error (reCAPTCHA v2 took longer than 90s)"));
+                reject(new Error("Timeout Error (reCAPTCHA v2 took > 65s)"));
             }
         }, timeout);
 
@@ -30,100 +30,72 @@ async function recaptchaV2({ domain, siteKey, action = "submit", isInvisible = f
                 <html lang="en">
                 <head>
                     <meta charset="UTF-8">
-                    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                    <title>reCAPTCHA v2 Solver</title>
-                    <style>
-                        body {
-                            font-family: Arial, sans-serif;
-                            margin: 0;
-                            padding: 20px;
-                            background: #f5f5f5;
-                            display: flex;
-                            justify-content: center;
-                            align-items: center;
-                            min-height: 100vh;
-                        }
-                        .container {
-                            background: white;
-                            padding: 30px;
-                            border-radius: 10px;
-                            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-                            text-align: center;
-                        }
-                    </style>
+                    <title>reCAPTCHA v2</title>
+                    <script src="https://www.google.com/recaptcha/api.js?onload=onRecaptchaLoad&render=explicit" async defer></script>
                 </head>
-                <body>
-                    <div class="container">
-                        <h2>reCAPTCHA v2 Solver</h2>
-                        <div id="recaptcha-container">
-                            <div class="g-recaptcha"
-                                 data-sitekey="${siteKey}"
-                                 data-callback="recaptchaCallback"
-                                 data-size="${isInvisible ? 'invisible' : 'normal'}"
-                                 data-theme="light"></div>
-                        </div>
-                        <input type="hidden" id="recaptcha-token-input" name="g-recaptcha-response" />
-                    </div>
-
+                <body style="background: #f5f5f5; display:flex; justify-content:center; align-items:center; height:100vh; margin:0;">
+                    <div id="recaptcha-widget"></div>
                     <script>
                         window.recaptchaToken = null;
-                        window.recaptchaCallback = function(token) {
-                            window.recaptchaToken = token;
-                            var input = document.getElementById('recaptcha-token-input');
-                            if (input) input.value = token;
-                        };
+                        function onRecaptchaLoad() {
+                            grecaptcha.render('recaptcha-widget', {
+                                'sitekey': '${siteKey}',
+                                'callback': function(token) {
+                                    window.recaptchaToken = token;
+                                }
+                            });
+                        }
                     </script>
-                    <script src="https://www.google.com/recaptcha/api.js" async defer></script>
                 </body>
                 </html>
             `;
 
-            await page.setRequestInterception(true);
-            page.removeAllListeners("request");
-            page.on("request", async (req) => {
-                const url = req.url();
-                if ([domain, domain + "/", domain + "/faucet/PEPE"].some(u => url.startsWith(u)) && req.resourceType() === "document") {
-                    await req.respond({ status: 200, contentType: "text/html", body: htmlContent });
-                } else if (url.includes("google.com") || url.includes("gstatic.com") || url.includes("recaptcha")) {
-                    await req.continue();
-                } else if (["media"].includes(req.resourceType())) {
-                    await req.abort();
-                } else {
-                    await req.continue();
-                }
-            });
+            try {
+                await page.setRequestInterception(true);
+                page.removeAllListeners("request");
+                page.on("request", async (req) => {
+                    const url = req.url();
+                    if (req.isNavigationRequest() && req.resourceType() === "document") {
+                        await req.respond({ status: 200, contentType: "text/html", body: htmlContent });
+                    } else if (["media"].includes(req.resourceType())) {
+                        await req.abort();
+                    } else {
+                        await req.continue();
+                    }
+                });
+            } catch (_) {}
 
             await page.goto(domain, { waitUntil: "domcontentloaded", timeout: 30000 });
 
-            // Tự động tương tác với checkbox reCAPTCHA v2
-            setTimeout(async () => {
-                try {
-                    if (isInvisible) {
-                        await page.evaluate(() => { if (window.grecaptcha) grecaptcha.execute(); });
-                    } else {
-                        const frameHandle = await page.waitForSelector('iframe[src*="google.com/recaptcha/api2/anchor"]', { timeout: 10000 }).catch(() => null);
-                        if (frameHandle) {
-                            const frame = await frameHandle.contentFrame();
-                            if (frame) {
-                                const checkbox = await frame.waitForSelector('#recaptcha-anchor', { timeout: 10000 }).catch(() => null);
-                                if (checkbox) {
-                                    await checkbox.click({ delay: 100 });
+            // Tự động tìm frame và click checkbox
+            const clickCheckbox = async () => {
+                for (let i = 0; i < 20; i++) {
+                    if (isResolved) break;
+                    try {
+                        for (const frame of page.frames()) {
+                            if (frame.url().includes("google.com/recaptcha") && frame.url().includes("anchor")) {
+                                const box = await frame.$("#recaptcha-anchor");
+                                if (box) {
+                                    await box.click();
+                                    return true;
                                 }
                             }
                         }
-                    }
-                } catch (_) {}
-            }, 1500);
+                    } catch (_) {}
+                    await new Promise(r => setTimeout(r, 1000));
+                }
+                return false;
+            };
 
-            // Chờ token hoàn thành
+            clickCheckbox();
+
+            // Chờ token hoàn tất
             const tokenHandle = await page.waitForFunction(() => {
-                const input = document.querySelector('#recaptcha-token-input');
-                if (input && input.value && input.value.length > 20) return input.value;
                 if (window.recaptchaToken && window.recaptchaToken.length > 20) return window.recaptchaToken;
                 const textarea = document.querySelector('textarea[name="g-recaptcha-response"]');
                 if (textarea && textarea.value && textarea.value.length > 20) return textarea.value;
                 return null;
-            }, { timeout, polling: 300 });
+            }, { timeout: 60000, polling: 300 });
 
             const tokenValue = await tokenHandle.jsonValue();
 
@@ -131,7 +103,7 @@ async function recaptchaV2({ domain, siteKey, action = "submit", isInvisible = f
             clearTimeout(cl);
 
             if (!tokenValue || tokenValue.length < 20) {
-                reject(new Error("Failed to get valid reCAPTCHA token"));
+                reject(new Error("Failed to get valid token"));
             } else {
                 resolve({ token: tokenValue, type: 'recaptcha_v2' });
             }
@@ -139,7 +111,7 @@ async function recaptchaV2({ domain, siteKey, action = "submit", isInvisible = f
             if (!isResolved) {
                 isResolved = true;
                 clearTimeout(cl);
-                reject(new Error(`reCAPTCHA solving failed: ${error.message}`));
+                reject(error);
             }
         }
     });

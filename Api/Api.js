@@ -203,17 +203,6 @@ async function executeTask({ taskId, type, domain, siteKey, action, proxy, isInv
         page = p;
         clearTimeout(timeoutId);
 
-        // Set request interception to block images, etc.
-        await page.setRequestInterception(true);
-        page.on('request', (req) => {
-            const type = req.resourceType();
-            if (["image", "stylesheet", "font", "media"].includes(type)) {
-                req.abort();
-            } else {
-                req.continue();
-            }
-        });
-
         await page.goto('about:blank');
 
         // 2. Choose solver based on type – each solver returns a promise
