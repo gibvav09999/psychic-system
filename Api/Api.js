@@ -157,15 +157,41 @@ async function executeTask({ taskId, type, domain, siteKey, action, proxy, isInv
     });
 
     try {
-        // 1. Launch browser (with optional proxy)
+        // 1. Launch browser (with auto-detected Chrome path & optional proxy)
+        const possiblePaths = [
+            process.env.CHROME_PATH,
+            process.env.CHROME_BIN,
+            process.env.PUPPETEER_EXECUTABLE_PATH,
+            '/usr/bin/google-chrome',
+            '/usr/bin/google-chrome-stable',
+            '/usr/bin/chromium',
+            '/usr/bin/chromium-browser',
+            '/snap/bin/chromium'
+        ].filter(Boolean);
+
+        let detectedChrome = possiblePaths.find(p => fs.existsSync(p));
+        if (detectedChrome) {
+            process.env.CHROME_PATH = detectedChrome;
+            process.env.CHROME_BIN = detectedChrome;
+            process.env.PUPPETEER_EXECUTABLE_PATH = detectedChrome;
+        }
+
         const connectOptions = {
             headless: false,
             turnstile: true,
-            connectOption: { defaultViewport: null },
+            connectOption: { 
+                defaultViewport: null,
+                args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
+            },
             disableXvfb: false,
+            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
         };
+        if (detectedChrome) {
+            connectOptions.customConfig = { chromePath: detectedChrome };
+            connectOptions.executablePath = detectedChrome;
+        }
         if (proxy?.server) {
-            connectOptions.args = [`--proxy-server=${proxy.server}`];
+            connectOptions.args.push(`--proxy-server=${proxy.server}`);
         }
 
         // Race between browser launch and timeout

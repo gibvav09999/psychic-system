@@ -58,7 +58,7 @@ if ! command -v python3 >/dev/null 2>&1; then
     fi
 fi
 
-# Kiểm tra lệnh pip / python3 -m pip
+# Kiểm tra lệnh pip
 PIP_CMD=""
 if command -v pip3 >/dev/null 2>&1; then
     PIP_CMD="pip3"
@@ -74,39 +74,47 @@ else
     fi
 fi
 
-# 4. Tự động kiểm tra và cài đặt Xvfb + Thư viện Chrome nếu thiếu
-if ! command -v Xvfb >/dev/null 2>&1; then
-    echo "🖥️  0. Đang cài đặt Xvfb và thư viện đồ họa..."
+# 4. Tự động kiểm tra và cài đặt Xvfb + Google Chrome / Chromium nếu thiếu
+if ! command -v google-chrome >/dev/null 2>&1 && ! command -v chromium >/dev/null 2>&1 && ! command -v chromium-browser >/dev/null 2>&1; then
+    echo "🌐 0. Đang cài đặt Google Chrome Stable & Xvfb..."
     if command -v apt-get >/dev/null 2>&1; then
-        run_root apt-get install -y --no-install-recommends \
-            xvfb \
-            ca-certificates \
-            fonts-liberation \
-            libasound2 \
-            libatk-bridge2.0-0 \
-            libatk1.0-0 \
-            libcups2 \
-            libdrm2 \
-            libgbm1 \
-            libglib2.0-0 \
-            libgtk-3-0 \
-            libnspr4 \
-            libnss3 \
-            libx11-6 \
-            libx11-xcb1 \
-            libxcb1 \
-            libxcomposite1 \
-            libxdamage1 \
-            libxext6 \
-            libxfixes3 \
-            libxrandr2 \
-            libxrender1 \
-            libxshmfence1 || true
+        run_root apt-get update -y
+        run_root apt-get install -y wget xvfb ca-certificates gnupg \
+            fonts-liberation libasound2 libatk-bridge2.0-0 libatk1.0-0 \
+            libcups2 libdrm2 libgbm1 libglib2.0-0 libgtk-3-0 libnspr4 libnss3 \
+            libx11-6 libx11-xcb1 libxcb1 libxcomposite1 libxdamage1 libxext6 \
+            libxfixes3 libxrandr2 libxrender1 libxshmfence1 || true
+
+        # Cài Google Chrome Stable
+        wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | run_root gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg 2>/dev/null || true
+        run_root sh -c 'echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list' 2>/dev/null || true
+        run_root apt-get update -y 2>/dev/null || true
+        run_root apt-get install -y google-chrome-stable 2>/dev/null || run_root apt-get install -y chromium chromium-browser 2>/dev/null || true
     fi
 fi
 
-# 5. Cài đặt dependencies dự án
-echo "📦 1. Kiểm tra Dependencies của dự án..."
+# 5. Tự động thiết lập đường dẫn CHROME_PATH
+if command -v google-chrome >/dev/null 2>&1; then
+    export CHROME_PATH="$(command -v google-chrome)"
+elif command -v google-chrome-stable >/dev/null 2>&1; then
+    export CHROME_PATH="$(command -v google-chrome-stable)"
+elif command -v chromium >/dev/null 2>&1; then
+    export CHROME_PATH="$(command -v chromium)"
+elif command -v chromium-browser >/dev/null 2>&1; then
+    export CHROME_PATH="$(command -v chromium-browser)"
+elif [ -f "/usr/bin/google-chrome" ]; then
+    export CHROME_PATH="/usr/bin/google-chrome"
+elif [ -f "/usr/bin/chromium" ]; then
+    export CHROME_PATH="/usr/bin/chromium"
+fi
+
+export CHROME_BIN="${CHROME_PATH:-/usr/bin/google-chrome}"
+export PUPPETEER_EXECUTABLE_PATH="$CHROME_BIN"
+export PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+echo "   -> Đã định vị Chrome tại: $CHROME_BIN"
+
+# 6. Cài đặt dependencies dự án
+echo "📦 1. Kiểm tra Dependencies dự án..."
 if [ ! -d "Api/node_modules" ]; then
     echo "   -> Cài đặt Node modules cho Solver API..."
     cd Api && npm install && cd ..
@@ -119,7 +127,7 @@ if ! python3 -c "import requests, dotenv, colorama" 2>/dev/null; then
     fi
 fi
 
-# 6. Khởi động màn hình ảo Xvfb
+# 7. Khởi động màn hình ảo Xvfb
 export DISPLAY="${DISPLAY:-:99}"
 if ! pgrep -f "Xvfb ${DISPLAY}" >/dev/null 2>&1; then
     echo "🖥️  2. Khởi động Xvfb (${DISPLAY})..."
@@ -133,14 +141,14 @@ if ! pgrep -f "Xvfb ${DISPLAY}" >/dev/null 2>&1; then
     fi
 fi
 
-# 7. Khởi động Captcha Solver API
+# 8. Khởi động Captcha Solver API
 echo "🤖 3. Khởi động Captcha Solver API (Port 8080)..."
 cd Api
 node Api.js > ../solver.log 2>&1 &
 API_PID=$!
 cd ..
 
-# 8. Chờ Solver API sẵn sàng
+# 9. Chờ Solver API sẵn sàng
 echo "⏳ 4. Chờ Solver API sẵn sàng..."
 MAX_RETRY=30
 RETRY=0
@@ -158,7 +166,7 @@ if [ $RETRY -eq $MAX_RETRY ]; then
     tail -n 20 solver.log 2>/dev/null || true
 fi
 
-# 9. Khởi động Python Bot
+# 10. Khởi động Python Bot
 echo "🪙 5. Bắt đầu chạy Python Bot..."
 echo "--------------------------------------------------"
 python3 app.py
