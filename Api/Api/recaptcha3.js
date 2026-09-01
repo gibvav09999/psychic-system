@@ -1,11 +1,11 @@
 /**
- * recaptcha3.js - Fast Native HTML Loader (No addScriptTag error)
+ * recaptcha3.js - Fast Token Generator
  */
 async function recaptchaV3({ domain, siteKey, action = "submit", proxy }, page) {
     if (!domain) throw new Error("Missing domain parameter");
     if (!siteKey) throw new Error("Missing siteKey parameter");
 
-    const timeout = 35000;
+    const timeout = 30000;
 
     return new Promise(async (resolve, reject) => {
         let isResolved = false;
@@ -34,23 +34,23 @@ async function recaptchaV3({ domain, siteKey, action = "submit", proxy }, page) 
                     <script src="https://www.google.com/recaptcha/api.js?render=${siteKey}"></script>
                 </head>
                 <body style="background:#f0f0f0; margin:0; padding:20px;">
-                    <h3>reCAPTCHA v3 Executing...</h3>
+                    <h3>reCAPTCHA v3</h3>
                     <script>
                         window.recaptchaToken = null;
-                        function executeRecaptcha() {
+                        function runRecaptcha() {
                             if (typeof grecaptcha !== 'undefined') {
                                 grecaptcha.ready(function() {
                                     grecaptcha.execute('${siteKey}', { action: '${action || "submit"}' }).then(function(token) {
                                         window.recaptchaToken = token;
                                     }).catch(function(err) {
-                                        window.recaptchaError = err.message || "Execute error";
+                                        window.recaptchaError = err ? (err.message || String(err)) : "Execute error";
                                     });
                                 });
                             } else {
-                                setTimeout(executeRecaptcha, 200);
+                                setTimeout(runRecaptcha, 150);
                             }
                         }
-                        executeRecaptcha();
+                        runRecaptcha();
                     </script>
                 </body>
                 </html>
@@ -60,7 +60,15 @@ async function recaptchaV3({ domain, siteKey, action = "submit", proxy }, page) 
                 await page.setRequestInterception(true);
                 page.removeAllListeners("request");
                 page.on("request", async (req) => {
-                    if (req.isNavigationRequest() && req.resourceType() === "document") {
+                    const url = req.url();
+                    // Chỉ intercept trang chủ chính của domain, TUYỆT ĐỐI không intercept iframe của Google reCAPTCHA
+                    const isMainDoc = (url === domain || url === domain + "/" || url.startsWith(domain)) && 
+                                      !url.includes("google.com") && 
+                                      !url.includes("gstatic.com") && 
+                                      !url.includes("recaptcha") && 
+                                      req.resourceType() === "document";
+
+                    if (isMainDoc) {
                         await req.respond({ status: 200, contentType: "text/html", body: htmlContent });
                     } else {
                         await req.continue();
@@ -68,15 +76,18 @@ async function recaptchaV3({ domain, siteKey, action = "submit", proxy }, page) 
                 });
             } catch (_) {}
 
-            await page.goto(domain, { waitUntil: "domcontentloaded", timeout: 25000 });
+            await page.goto(domain, { waitUntil: "domcontentloaded", timeout: 20000 });
 
             // Chờ token hoàn thành
             const tokenHandle = await page.waitForFunction(() => {
                 if (window.recaptchaToken && window.recaptchaToken.length > 20) {
                     return window.recaptchaToken;
                 }
+                if (window.recaptchaError) {
+                    throw new Error("reCAPTCHA execution error: " + window.recaptchaError);
+                }
                 return null;
-            }, { timeout: 25000, polling: 100 });
+            }, { timeout: 25000, polling: 150 });
 
             const token = await tokenHandle.jsonValue();
 
