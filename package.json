@@ -1,0 +1,25 @@
+{
+  "name": "pepe-bot-solver",
+  "version": "1.0.0",
+  "description": "Captcha Solver API & Auto Claim Bot for CodeSandbox",
+  "main": "app.py",
+  "scripts": {
+    "setup": "pip install -r requirements.txt && cd Api && npm install",
+    "start": "bash start.sh",
+    "start:all": "bash start.sh",
+    "solver": "cd Api && node Api.js",
+    "bot": "python3 app.py"
+  },
+  "keywords": [
+    "codesandbox",
+    "captcha-solver",
+    "turnstile",
+    "recaptcha"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "express": "^5.1.0",
+    "puppeteer-real-browser": "^1.4.0"
+  }
+}

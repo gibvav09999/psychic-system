@@ -1,0 +1,25 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Logs & temporary files
+*.log
+bot.log
+solver.log
+xvfb.log
+
+# App state / sessions
+cookies_pepe.json
+stats_pepe.json
+cache/
+
+# OS files
+.DS_Store
+Thumbs.db

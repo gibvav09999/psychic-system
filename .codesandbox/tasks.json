@@ -1,0 +1,27 @@
+{
+  "$schema": "https://codesandbox.io/schemas/tasks.json",
+  "setupTasks": [
+    {
+      "name": "Cài đặt thư viện",
+      "command": "npm run setup"
+    }
+  ],
+  "tasks": {
+    "start-all": {
+      "name": "Chạy Toàn Bộ (Solver API + Bot)",
+      "command": "bash start.sh",
+      "runAtStart": true
+    },
+    "solver": {
+      "name": "Chỉ chạy Solver API",
+      "command": "npm run solver",
+      "preview": {
+        "port": 8080
+      }
+    },
+    "bot": {
+      "name": "Chỉ chạy Python Bot",
+      "command": "npm run bot"
+    }
+  }
+}
