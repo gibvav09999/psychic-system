@@ -1,5 +1,5 @@
 /**
- * recaptcha3.js - Fast Token Generator without Image Challenges
+ * recaptcha3.js - Fast Native HTML Loader (No addScriptTag error)
  */
 async function recaptchaV3({ domain, siteKey, action = "submit", proxy }, page) {
     if (!domain) throw new Error("Missing domain parameter");
@@ -25,32 +25,66 @@ async function recaptchaV3({ domain, siteKey, action = "submit", proxy }, page) 
                 });
             }
 
+            const htmlContent = `
+                <!DOCTYPE html>
+                <html lang="en">
+                <head>
+                    <meta charset="UTF-8">
+                    <title>reCAPTCHA v3</title>
+                    <script src="https://www.google.com/recaptcha/api.js?render=${siteKey}"></script>
+                </head>
+                <body style="background:#f0f0f0; margin:0; padding:20px;">
+                    <h3>reCAPTCHA v3 Executing...</h3>
+                    <script>
+                        window.recaptchaToken = null;
+                        function executeRecaptcha() {
+                            if (typeof grecaptcha !== 'undefined') {
+                                grecaptcha.ready(function() {
+                                    grecaptcha.execute('${siteKey}', { action: '${action || "submit"}' }).then(function(token) {
+                                        window.recaptchaToken = token;
+                                    }).catch(function(err) {
+                                        window.recaptchaError = err.message || "Execute error";
+                                    });
+                                });
+                            } else {
+                                setTimeout(executeRecaptcha, 200);
+                            }
+                        }
+                        executeRecaptcha();
+                    </script>
+                </body>
+                </html>
+            `;
+
+            try {
+                await page.setRequestInterception(true);
+                page.removeAllListeners("request");
+                page.on("request", async (req) => {
+                    if (req.isNavigationRequest() && req.resourceType() === "document") {
+                        await req.respond({ status: 200, contentType: "text/html", body: htmlContent });
+                    } else {
+                        await req.continue();
+                    }
+                });
+            } catch (_) {}
+
             await page.goto(domain, { waitUntil: "domcontentloaded", timeout: 25000 });
 
-            // Nạp thư viện Google reCAPTCHA
-            await page.addScriptTag({ url: "https://www.google.com/recaptcha/api.js?render=" + siteKey });
+            // Chờ token hoàn thành
+            const tokenHandle = await page.waitForFunction(() => {
+                if (window.recaptchaToken && window.recaptchaToken.length > 20) {
+                    return window.recaptchaToken;
+                }
+                return null;
+            }, { timeout: 25000, polling: 100 });
 
-            // Chờ grecaptcha khởi tạo
-            await page.waitForFunction(() => typeof window.grecaptcha !== "undefined" && typeof window.grecaptcha.execute === "function", { timeout: 15000 });
-
-            const token = await page.evaluate(async (sKey, act) => {
-                return new Promise((res, rej) => {
-                    grecaptcha.ready(async () => {
-                        try {
-                            const t = await grecaptcha.execute(sKey, { action: act || "submit" });
-                            res(t);
-                        } catch (err) {
-                            rej(err);
-                        }
-                    });
-                });
-            }, siteKey, action);
+            const token = await tokenHandle.jsonValue();
 
             isResolved = true;
             clearTimeout(cl);
 
-            if (!token || token.length < 10) {
-                reject(new Error("Failed to get valid token"));
+            if (!token || token.length < 20) {
+                reject(new Error("Failed to get valid reCAPTCHA v3 token"));
             } else {
                 resolve({ token: token, type: "recaptcha3" });
             }
