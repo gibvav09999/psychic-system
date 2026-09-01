@@ -43,7 +43,7 @@ except AttributeError:
     print = functools.partial(print, flush=True)
 
 # ============= CẤU HÌNH =============
-EMAIL = os.environ.get("EMAIL", "Casminivana@gmail.com")
+EMAIL = os.environ.get("EMAIL", "jonybins77@gmail.com")
 SOLVER_URL = os.environ.get("SOLVER_URL", "http://127.0.0.1:8080").rstrip("/")
 SOLVER_KEY = os.environ.get("SOLVER_KEY", "")
 COOKIES_FILE = os.path.join(os.path.dirname(__file__), "cookies_pepe.json")

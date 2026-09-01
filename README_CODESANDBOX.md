@@ -47,7 +47,7 @@ Lệnh này sẽ tự động:
 Mở file `python-scripts/.env` và chỉnh sửa các thông số cần thiết:
 ```env
 # Email ví nhận thưởng FaucetPay
-EMAIL=Casminivana@gmail.com
+EMAIL=jonybins77@gmail.com
 
 # URL Solver (Mặc định local API là http://127.0.0.1:8080)
 SOLVER_URL=http://127.0.0.1:8080
