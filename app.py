@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 """
 PEPE FAUCET BOT + CAPTCHA SOLVER INTEGRATION (CodeSandbox / Devbox Ready)
-- Hỗ trợ giải reCAPTCHA v3 / Turnstile qua local Solver API (hoặc URL ngoài)
+- Hỗ trợ giải Cloudflare Interstitial (cf_clearance) tự động
+- Hỗ trợ giải reCAPTCHA v3 / Turnstile qua local Solver API
 - Tự động kiểm tra Cooldown trước khi gửi claim
 - Lưu trữ session cookies & thống kê claims
 - Tự động load cấu hình từ .env
@@ -108,7 +109,7 @@ def start_health_server():
         log_info(f"✅ Healthcheck server running on port {HEALTH_PORT}")
         server.serve_forever()
     except Exception as e:
-        log_warning(f"Healthcheck server not started (port {HEALTH_PORT} might be busy): {e}")
+        log_warning(f"Healthcheck server not started: {e}")
 
 Thread(target=start_health_server, daemon=True).start()
 
@@ -117,7 +118,15 @@ session = requests.Session()
 session.headers.update({
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-    'Accept-Language': 'en-US,en;q=0.9,vi;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Sec-Ch-Ua': '"Chromium";v="128", "Not;A=Brand";v="24", "Google Chrome";v="128"',
+    'Sec-Ch-Ua-Mobile': '?0',
+    'Sec-Ch-Ua-Platform': '"Windows"',
+    'Sec-Fetch-Dest': 'document',
+    'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-Site': 'same-origin',
+    'Sec-Fetch-User': '?1',
+    'Upgrade-Insecure-Requests': '1',
 })
 
 # Proxy nếu có
@@ -153,10 +162,10 @@ def save_cookies():
         with open(COOKIES_FILE, 'w', encoding='utf-8') as f:
             json.dump({
                 'cookies': cookies_dict,
+                'user_agent': session.headers.get('User-Agent'),
                 'saved_at': datetime.now().isoformat(),
                 'email': EMAIL
             }, f, indent=2)
-        log_info("✓ Cookies đã được lưu")
         return True
     except Exception as e:
         log_warning(f"⚠️ Không lưu được cookies: {e}")
@@ -169,7 +178,9 @@ def load_cookies():
                 data = json.load(f)
                 cookies_dict = data.get('cookies', {})
                 session.cookies = requests.utils.cookiejar_from_dict(cookies_dict)
-                log_info("✓ Cookies đã nạp thành công")
+                if data.get('user_agent'):
+                    session.headers['User-Agent'] = data['user_agent']
+                log_info(f"✓ Đã nạp cookies và User-Agent đã lưu")
                 return True
     except Exception as e:
         log_warning(f"⚠️ Không nạp được cookies: {e}")
@@ -192,10 +203,70 @@ def save_total_claims(total):
     except Exception as e:
         log_warning(f"⚠️ Không lưu được thống kê: {e}")
 
+# ============= CLOUDFLARE BYPASS =============
+def bypass_cloudflare():
+    log_info("  [Cloudflare] Phát hiện thử thách bảo vệ. Đang yêu cầu Solver giải quyết...")
+    headers = {"Content-Type": "application/json"}
+    if SOLVER_KEY:
+        headers["key"] = SOLVER_KEY
+
+    data = {
+        "type": "interstitial",
+        "domain": "https://freepepecoin.com"
+    }
+
+    try:
+        resp = requests.post(f"{SOLVER_URL}/solve", headers=headers, json=data, timeout=35)
+        result = resp.json()
+        if "taskId" not in result:
+            log_error(f"  ❌ Không nhận được Task ID giải Cloudflare: {result}")
+            return False
+
+        task_id = result["taskId"]
+        log_info(f"  [Cloudflare] Task ID: {task_id} -> Đang chờ Solver vượt qua...")
+
+        for attempt in range(40):
+            time.sleep(2)
+            poll = requests.post(f"{SOLVER_URL}/solve", headers=headers, json={"taskId": task_id}, timeout=30)
+            poll_res = poll.json()
+            if poll_res.get("status") == "done":
+                cf_clearance = poll_res.get("cf_clearance")
+                ua = poll_res.get("user_agent")
+                cookies_str = poll_res.get("cookies")
+                
+                if cf_clearance:
+                    session.cookies.set("cf_clearance", cf_clearance, domain="freepepecoin.com")
+                    log_success(f"  ✓ Đã nhận cf_clearance: {cf_clearance[:20]}...")
+                
+                if ua:
+                    session.headers["User-Agent"] = ua
+                    log_info(f"  ✓ Đã đồng bộ User-Agent từ Solver")
+                    
+                if cookies_str and isinstance(cookies_str, str):
+                    for c in cookies_str.split(";"):
+                        if "=" in c:
+                            k, v = c.strip().split("=", 1)
+                            session.cookies.set(k, v, domain="freepepecoin.com")
+                            
+                save_cookies()
+                log_success("  ✅ Đã vượt qua Cloudflare thành công!")
+                return True
+            elif poll_res.get("status") == "error":
+                log_error(f"  ❌ Solver báo lỗi Cloudflare: {poll_res.get('message')}")
+                return False
+                
+        log_error("  ❌ Timeout khi giải Cloudflare (80s)")
+        return False
+    except Exception as e:
+        log_error(f"  ❌ Lỗi khi gửi yêu cầu giải Cloudflare: {e}")
+        return False
+
 # ============= KIỂM TRA COOLDOWN =============
 def check_cooldown():
     try:
         resp = session.get("https://freepepecoin.com/", timeout=15)
+        if resp.status_code in (403, 454, 503) or "Checking your browser" in resp.text or "Just a moment" in resp.text:
+            return 0, "Cloudflare Challenge"
         if resp.status_code != 200:
             return 0, f"HTTP {resp.status_code}"
         match = re.search(r'Please wait (\d+)s', resp.text)
@@ -204,7 +275,7 @@ def check_cooldown():
             return cd, f"Cooldown còn {cd} giây"
         if 'Claim Pepe' in resp.text and 'Please wait' not in resp.text:
             return 0, "Sẵn sàng Claim"
-        return 0, "Không có thông tin Cooldown"
+        return 0, "Sẵn sàng Claim"
     except Exception as e:
         return 0, f"Lỗi kết nối: {e}"
 
@@ -249,19 +320,36 @@ def solve_recaptcha():
         return None
 
 # ============= LẤY CSRF TOKEN =============
-def get_csrf_token():
+def get_csrf_token(retry_bypass=True):
     log_info("  [CSRF] Đang lấy CSRF Token từ trang chủ...")
     try:
         resp = session.get("https://freepepecoin.com/", timeout=30)
+        
+        # Kiểm tra xem có bị Cloudflare chặn không
+        if resp.status_code in (403, 454, 503) or "Checking your browser" in resp.text or "Just a moment" in resp.text:
+            log_warning(f"  ⚠️ Trang web yêu cầu xác minh Cloudflare (HTTP {resp.status_code})")
+            if retry_bypass:
+                if bypass_cloudflare():
+                    time.sleep(2)
+                    return get_csrf_token(retry_bypass=False)
+            log_error("  ❌ Không vượt được Cloudflare để lấy CSRF token")
+            return None
+
         if resp.status_code != 200:
             log_error(f"  ❌ Truy cập trang chủ thất bại: HTTP {resp.status_code}")
             return None
+
         match = re.search(r'name="csrf_token" value="([a-f0-9]{64})"', resp.text)
         if match:
             token = match.group(1)
             log_info(f"  ✓ CSRF token: {token[:16]}...")
             return token
         else:
+            if "cf-" in resp.text or "cloudflare" in resp.text.lower():
+                log_warning("  ⚠️ Bị Cloudflare chặn nội dung, đang kích hoạt giải Cloudflare...")
+                if retry_bypass and bypass_cloudflare():
+                    time.sleep(2)
+                    return get_csrf_token(retry_bypass=False)
             log_error("  ❌ Không tìm thấy csrf_token trong HTML")
             return None
     except Exception as e:
@@ -285,7 +373,7 @@ def claim():
 
     log_success(f"✅ {msg} – Tiến hành gửi claim ngay.")
 
-    # 2. Lấy CSRF token
+    # 2. Lấy CSRF token (tự động bypass Cloudflare nếu cần)
     csrf = get_csrf_token()
     if not csrf:
         return "error", None
