@@ -317,46 +317,48 @@ def ensure_login():
 
 # ============= SOLVE RECAPTCHA =============
 def solve_recaptcha(site_key, is_v2=True):
-    solver_type = "recaptcha2" if is_v2 else "recaptcha3"
-    log_info(f"  [reCAPTCHA] Gửi yêu cầu giải {solver_type} (Sitekey: {site_key[:12]}...)...")
+    solver_types = ["recaptcha3", "recaptcha2"]
     
-    headers = {"Content-Type": "application/json"}
-    if SOLVER_KEY:
-        headers["key"] = SOLVER_KEY
+    for solver_type in solver_types:
+        log_info(f"  [reCAPTCHA] Gửi yêu cầu giải {solver_type} (Sitekey: {site_key[:12]}...)...")
+        
+        headers = {"Content-Type": "application/json"}
+        if SOLVER_KEY:
+            headers["key"] = SOLVER_KEY
 
-    data = {
-        "type": solver_type,
-        "domain": FAUCET_URL,
-        "siteKey": site_key
-    }
+        data = {
+            "type": solver_type,
+            "domain": BASE_URL,
+            "siteKey": site_key
+        }
 
-    try:
-        resp = requests.post(f"{SOLVER_URL}/solve", headers=headers, json=data, timeout=30)
-        result = resp.json()
-        if "taskId" not in result:
-            log_error(f"  ❌ Không nhận được Task ID: {result}")
-            return None
+        try:
+            resp = requests.post(f"{SOLVER_URL}/solve", headers=headers, json=data, timeout=30)
+            result = resp.json()
+            if "taskId" not in result:
+                log_warning(f"  ⚠️ Không nhận được Task ID ({solver_type}): {result}")
+                continue
 
-        task_id = result["taskId"]
-        log_info(f"  [reCAPTCHA] Task ID: {task_id} -> Đang giải...")
+            task_id = result["taskId"]
+            log_info(f"  [reCAPTCHA] Task ID: {task_id} ({solver_type}) -> Đang giải...")
 
-        for _ in range(45):
-            time.sleep(2)
-            poll = requests.post(f"{SOLVER_URL}/solve", headers=headers, json={"taskId": task_id}, timeout=30)
-            poll_res = poll.json()
-            if poll_res.get("status") == "done":
-                token = poll_res.get("token") or poll_res.get("solution", {}).get("token")
-                if token:
-                    log_success(f"  ✓ reCAPTCHA solved thành công!")
-                    return token
-            elif poll_res.get("status") == "error":
-                log_error(f"  ❌ Solver báo lỗi: {poll_res.get('message', 'Unknown')}")
-                return None
-        log_error("  ❌ Timeout chờ kết quả từ solver (90s)")
-        return None
-    except Exception as e:
-        log_error(f"  ❌ Lỗi gọi solver API: {e}")
-        return None
+            for _ in range(20):
+                time.sleep(2)
+                poll = requests.post(f"{SOLVER_URL}/solve", headers=headers, json={"taskId": task_id}, timeout=30)
+                poll_res = poll.json()
+                if poll_res.get("status") == "done":
+                    token = poll_res.get("token") or poll_res.get("solution", {}).get("token")
+                    if token:
+                        log_success(f"  ✓ reCAPTCHA solved thành công ({solver_type})!")
+                        return token
+                elif poll_res.get("status") == "error":
+                    log_warning(f"  ⚠️ Solver {solver_type} báo lỗi: {poll_res.get('message', 'Unknown')}")
+                    break
+        except Exception as e:
+            log_warning(f"  ⚠️ Lỗi gọi solver API ({solver_type}): {e}")
+
+    log_error("  ❌ Không thể giải captcha sau các lần thử")
+    return None
 
 # ============= CLAIM FUNCTION =============
 total_claims = load_total_claims()
