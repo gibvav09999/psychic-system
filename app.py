@@ -2,11 +2,11 @@
 # -*- coding: utf-8 -*-
 """
 PEPE FAUCET BOT + CAPTCHA SOLVER INTEGRATION (CodeSandbox / Devbox Ready)
-- Hỗ trợ giải Cloudflare Interstitial (cf_clearance) tự động
-- Hỗ trợ giải reCAPTCHA v3 / Turnstile qua local Solver API
-- Tự động kiểm tra Cooldown trước khi gửi claim
-- Lưu trữ session cookies & thống kê claims
-- Tự động load cấu hình từ .env
+- Tự động vượt Simply.com / Cloudflare PoW Security Check
+- Tự động đăng nhập FaucetPay Email và duy trì phiên làm việc
+- Tự động lấy CSRF token & Sitekey trên /faucet/PEPE
+- Gọi Solver API giải reCAPTCHA v2 / v3
+- Tự động kiểm tra Cooldown và thực hiện Claim định kỳ
 """
 
 import sys
@@ -14,6 +14,7 @@ import os
 import json
 import time
 import re
+import hashlib
 import requests
 import traceback
 from datetime import datetime
@@ -27,7 +28,7 @@ try:
 except ImportError:
     pass
 
-# Hỗ trợ màu terminal với colorama nếu có
+# Hỗ trợ màu terminal với colorama
 try:
     from colorama import init, Fore, Style
     init(autoreset=True)
@@ -52,6 +53,9 @@ LOG_FILE     = os.path.join(os.path.dirname(__file__), "bot.log")
 MAX_CLAIMS   = int(os.environ.get("MAX_CLAIMS", "100000"))
 HEALTH_PORT  = int(os.environ.get("HEALTH_PORT", "7860"))
 ENABLE_HEALTH_SERVER = os.environ.get("ENABLE_HEALTH_SERVER", "false").lower() == "true"
+
+BASE_URL = "https://freepepecoin.com"
+FAUCET_URL = f"{BASE_URL}/faucet/PEPE"
 
 # ============= LOGGING =============
 def get_colored(text, color_code):
@@ -116,17 +120,11 @@ Thread(target=start_health_server, daemon=True).start()
 # ============= HTTP SESSION =============
 session = requests.Session()
 session.headers.update({
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
     'Accept-Language': 'en-US,en;q=0.9',
-    'Sec-Ch-Ua': '"Chromium";v="128", "Not;A=Brand";v="24", "Google Chrome";v="128"',
-    'Sec-Ch-Ua-Mobile': '?0',
-    'Sec-Ch-Ua-Platform': '"Windows"',
-    'Sec-Fetch-Dest': 'document',
-    'Sec-Fetch-Mode': 'navigate',
-    'Sec-Fetch-Site': 'same-origin',
-    'Sec-Fetch-User': '?1',
-    'Upgrade-Insecure-Requests': '1',
+    'Origin': BASE_URL,
+    'Referer': f"{BASE_URL}/"
 })
 
 # Proxy nếu có
@@ -176,12 +174,13 @@ def load_cookies():
         if os.path.exists(COOKIES_FILE):
             with open(COOKIES_FILE, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-                cookies_dict = data.get('cookies', {})
-                session.cookies = requests.utils.cookiejar_from_dict(cookies_dict)
-                if data.get('user_agent'):
-                    session.headers['User-Agent'] = data['user_agent']
-                log_info(f"✓ Đã nạp cookies và User-Agent đã lưu")
-                return True
+                if data.get('email') == EMAIL:
+                    cookies_dict = data.get('cookies', {})
+                    session.cookies = requests.utils.cookiejar_from_dict(cookies_dict)
+                    if data.get('user_agent'):
+                        session.headers['User-Agent'] = data['user_agent']
+                    log_info("✓ Đã nạp cookies phiên làm việc")
+                    return True
     except Exception as e:
         log_warning(f"⚠️ Không nạp được cookies: {e}")
     return False
@@ -203,157 +202,147 @@ def save_total_claims(total):
     except Exception as e:
         log_warning(f"⚠️ Không lưu được thống kê: {e}")
 
-# ============= CLOUDFLARE BYPASS =============
-def bypass_cloudflare():
-    log_info("  [Cloudflare] Phát hiện thử thách bảo vệ. Đang yêu cầu Solver giải quyết...")
-    headers = {"Content-Type": "application/json"}
-    if SOLVER_KEY:
-        headers["key"] = SOLVER_KEY
+# ============= SIMPLY.COM WAF POW SOLVER =============
+def solve_simply_pow(html):
+    t_match = re.search(r'var T="([a-f0-9]+)"', html) or re.search(r'T="([a-f0-9]+)"', html)
+    ts_match = re.search(r'TS="([0-9]+)"', html)
+    d_match = re.search(r'D=([0-9]+)', html)
 
-    data = {
-        "type": "interstitial",
-        "domain": "https://freepepecoin.com"
-    }
+    if not (t_match and ts_match and d_match):
+        return False
+
+    T = t_match.group(1)
+    TS = ts_match.group(1)
+    D = int(d_match.group(1))
+
+    log_info(f"  [WAF] Đang giải Proof-of-Work bảo vệ (Difficulty={D})...")
+
+    def lz(h):
+        count = 0
+        for ch in h:
+            n = int(ch, 16)
+            if n == 0: count += 4
+            elif n < 2: count += 3; break
+            elif n < 4: count += 2; break
+            elif n < 8: count += 1; break
+            else: break
+        return count
+
+    nonce = 0
+    t0 = time.time()
+    while True:
+        h = hashlib.sha256(f"{T}:{nonce}".encode()).hexdigest()
+        if lz(h) >= D:
+            break
+        nonce += 1
+
+    dur = time.time() - t0
+    log_success(f"  ✓ PoW Solved (Nonce: {nonce} trong {dur:.2f}s)")
+
+    resp = session.post(
+        f"{BASE_URL}/.sc-verify/",
+        data={"ts": TS, "nonce": str(nonce), "token": T},
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Referer": f"{BASE_URL}/",
+            "Origin": BASE_URL
+        },
+        timeout=15
+    )
 
     try:
-        resp = requests.post(f"{SOLVER_URL}/solve", headers=headers, json=data, timeout=35)
-        result = resp.json()
-        if "taskId" not in result:
-            log_error(f"  ❌ Không nhận được Task ID giải Cloudflare: {result}")
+        j = resp.json()
+        if j.get("ok"):
+            session.cookies.set("sc_clearance", j["cookie"], domain="freepepecoin.com")
+            log_success("  ✓ Đã thiết lập sc_clearance cookie thành công")
+            save_cookies()
+            return True
+    except Exception as e:
+        log_error(f"  ❌ Lỗi xác thực PoW: {e}")
+    return False
+
+def get_page(url):
+    """Tự động xử lý WAF/PoW khi truy cập trang bất kỳ."""
+    try:
+        resp = session.get(url, timeout=20)
+        if resp.status_code in (454, 455) or "Checking your browser" in resp.text:
+            if solve_simply_pow(resp.text):
+                time.sleep(1)
+                resp = session.get(url, timeout=20)
+        return resp
+    except Exception as e:
+        log_error(f"  ❌ Lỗi kết nối {url}: {e}")
+        return None
+
+# ============= LOGIN FLOW =============
+def login():
+    log_info(f"🔑 Đang đăng nhập tài khoản FaucetPay: {EMAIL}...")
+    # 1. Tải trang chủ
+    r = get_page(f"{BASE_URL}/")
+    if not r:
+        return False
+
+    # 2. Gửi form login
+    try:
+        login_resp = session.post(
+            f"{BASE_URL}/",
+            data={"address": EMAIL},
+            headers={"Content-Type": "application/x-www-form-urlencoded", "Referer": f"{BASE_URL}/"},
+            allow_redirects=True,
+            timeout=20
+        )
+        if login_resp.status_code == 200 and ("dashboard" in login_resp.url or "faucet_user" in session.cookies):
+            log_success(f"  ✅ Đăng nhập thành công! Phiên: {session.cookies.get('faucet_user', 'OK')[:12]}...")
+            save_cookies()
+            return True
+        else:
+            log_error(f"  ❌ Đăng nhập thất bại (HTTP {login_resp.status_code})")
             return False
-
-        task_id = result["taskId"]
-        log_info(f"  [Cloudflare] Task ID: {task_id} -> Đang chờ Solver vượt qua...")
-
-        for attempt in range(40):
-            time.sleep(2)
-            poll = requests.post(f"{SOLVER_URL}/solve", headers=headers, json={"taskId": task_id}, timeout=30)
-            poll_res = poll.json()
-            if poll_res.get("status") == "done":
-                cf_clearance = poll_res.get("cf_clearance")
-                ua = poll_res.get("user_agent")
-                cookies_str = poll_res.get("cookies")
-                
-                if cf_clearance:
-                    session.cookies.set("cf_clearance", cf_clearance, domain="freepepecoin.com")
-                    log_success(f"  ✓ Đã nhận cf_clearance: {cf_clearance[:20]}...")
-                
-                if ua:
-                    session.headers["User-Agent"] = ua
-                    log_info(f"  ✓ Đã đồng bộ User-Agent từ Solver")
-                    
-                if cookies_str and isinstance(cookies_str, str):
-                    for c in cookies_str.split(";"):
-                        if "=" in c:
-                            k, v = c.strip().split("=", 1)
-                            session.cookies.set(k, v, domain="freepepecoin.com")
-                            
-                save_cookies()
-                log_success("  ✅ Đã vượt qua Cloudflare thành công!")
-                return True
-            elif poll_res.get("status") == "error":
-                log_error(f"  ❌ Solver báo lỗi Cloudflare: {poll_res.get('message')}")
-                return False
-                
-        log_error("  ❌ Timeout khi giải Cloudflare (80s)")
-        return False
     except Exception as e:
-        log_error(f"  ❌ Lỗi khi gửi yêu cầu giải Cloudflare: {e}")
+        log_error(f"  ❌ Lỗi gửi đăng nhập: {e}")
         return False
-
-# ============= KIỂM TRA COOLDOWN =============
-def check_cooldown():
-    try:
-        resp = session.get("https://freepepecoin.com/", timeout=15)
-        if resp.status_code in (403, 454, 503) or "Checking your browser" in resp.text or "Just a moment" in resp.text:
-            return 0, "Cloudflare Challenge"
-        if resp.status_code != 200:
-            return 0, f"HTTP {resp.status_code}"
-        match = re.search(r'Please wait (\d+)s', resp.text)
-        if match:
-            cd = int(match.group(1))
-            return cd, f"Cooldown còn {cd} giây"
-        if 'Claim Pepe' in resp.text and 'Please wait' not in resp.text:
-            return 0, "Sẵn sàng Claim"
-        return 0, "Sẵn sàng Claim"
-    except Exception as e:
-        return 0, f"Lỗi kết nối: {e}"
 
 # ============= SOLVE RECAPTCHA =============
-def solve_recaptcha():
-    log_info("  [reCAPTCHA] Đang gửi yêu cầu giải captcha tới Solver API...")
+def solve_recaptcha(site_key, is_v2=True):
+    solver_type = "recaptcha2" if is_v2 else "recaptcha3"
+    log_info(f"  [reCAPTCHA] Gửi yêu cầu giải {solver_type} (Sitekey: {site_key[:12]}...)...")
+    
     headers = {"Content-Type": "application/json"}
     if SOLVER_KEY:
         headers["key"] = SOLVER_KEY
 
     data = {
-        "type": "recaptcha3",
-        "domain": "https://freepepecoin.com",
-        "siteKey": "6LcbMB0sAAAAAAxsy76NqLNBhHfzZO8E4jLJ8XNl"
+        "type": solver_type,
+        "domain": FAUCET_URL,
+        "siteKey": site_key
     }
 
     try:
         resp = requests.post(f"{SOLVER_URL}/solve", headers=headers, json=data, timeout=30)
         result = resp.json()
         if "taskId" not in result:
-            log_error(f"  ❌ Không lấy được Task ID: {result}")
+            log_error(f"  ❌ Không nhận được Task ID: {result}")
             return None
-        task_id = result["taskId"]
-        log_info(f"  [reCAPTCHA] Task ID: {task_id} -> Đang chờ giải...")
 
-        for attempt in range(45):
+        task_id = result["taskId"]
+        log_info(f"  [reCAPTCHA] Task ID: {task_id} -> Đang giải...")
+
+        for _ in range(45):
             time.sleep(2)
             poll = requests.post(f"{SOLVER_URL}/solve", headers=headers, json={"taskId": task_id}, timeout=30)
             poll_res = poll.json()
             if poll_res.get("status") == "done":
                 token = poll_res.get("token") or poll_res.get("solution", {}).get("token")
                 if token:
-                    log_success("  ✓ reCAPTCHA solved thành công!")
+                    log_success(f"  ✓ reCAPTCHA solved thành công!")
                     return token
             elif poll_res.get("status") == "error":
-                log_error(f"  ❌ Solver trả về lỗi: {poll_res.get('message', 'Unknown error')}")
+                log_error(f"  ❌ Solver báo lỗi: {poll_res.get('message', 'Unknown')}")
                 return None
-        log_error("  ❌ Timeout khi chờ kết quả từ solver (90s)")
+        log_error("  ❌ Timeout chờ kết quả từ solver (90s)")
         return None
     except Exception as e:
-        log_error(f"  ❌ Lỗi khi gọi solver: {e}")
-        return None
-
-# ============= LẤY CSRF TOKEN =============
-def get_csrf_token(retry_bypass=True):
-    log_info("  [CSRF] Đang lấy CSRF Token từ trang chủ...")
-    try:
-        resp = session.get("https://freepepecoin.com/", timeout=30)
-        
-        # Kiểm tra xem có bị Cloudflare chặn không
-        if resp.status_code in (403, 454, 503) or "Checking your browser" in resp.text or "Just a moment" in resp.text:
-            log_warning(f"  ⚠️ Trang web yêu cầu xác minh Cloudflare (HTTP {resp.status_code})")
-            if retry_bypass:
-                if bypass_cloudflare():
-                    time.sleep(2)
-                    return get_csrf_token(retry_bypass=False)
-            log_error("  ❌ Không vượt được Cloudflare để lấy CSRF token")
-            return None
-
-        if resp.status_code != 200:
-            log_error(f"  ❌ Truy cập trang chủ thất bại: HTTP {resp.status_code}")
-            return None
-
-        match = re.search(r'name="csrf_token" value="([a-f0-9]{64})"', resp.text)
-        if match:
-            token = match.group(1)
-            log_info(f"  ✓ CSRF token: {token[:16]}...")
-            return token
-        else:
-            if "cf-" in resp.text or "cloudflare" in resp.text.lower():
-                log_warning("  ⚠️ Bị Cloudflare chặn nội dung, đang kích hoạt giải Cloudflare...")
-                if retry_bypass and bypass_cloudflare():
-                    time.sleep(2)
-                    return get_csrf_token(retry_bypass=False)
-            log_error("  ❌ Không tìm thấy csrf_token trong HTML")
-            return None
-    except Exception as e:
-        log_error(f"  ❌ Lỗi khi lấy CSRF: {e}")
+        log_error(f"  ❌ Lỗi gọi solver API: {e}")
         return None
 
 # ============= CLAIM FUNCTION =============
@@ -361,80 +350,112 @@ total_claims = load_total_claims()
 
 def claim():
     global total_claims
-    log_info("\n" + "="*50)
+    log_info("\n" + "="*55)
     log_info("🪙  BẮT ĐẦU QUY TRÌNH CLAIM PEPE")
-    log_info("="*50)
+    log_info("="*55)
 
-    # 1. Kiểm tra Cooldown
-    cd, msg = check_cooldown()
-    if cd > 0:
-        log_warning(f"⏳ {msg} – Chờ hết cooldown...")
-        return "cooldown", cd
+    # 1. Tải trang /faucet/PEPE
+    log_info(f"  [1/4] Đang nạp trang vòi PEPE: {FAUCET_URL}")
+    r = get_page(FAUCET_URL)
+    if not r:
+        return "error", 30
 
-    log_success(f"✅ {msg} – Tiến hành gửi claim ngay.")
+    # Nếu bị đá về trang login (chưa đăng nhập)
+    if 'name="address"' in r.text or "Start Earning" in r.text:
+        log_warning("  ⚠️ Chưa đăng nhập hoặc phiên hết hạn. Đang tiến hành đăng nhập lại...")
+        if not login():
+            return "error", 30
+        r = get_page(FAUCET_URL)
+        if not r or 'name="address"' in r.text:
+            log_error("  ❌ Không thể vào trang vòi sau khi đăng nhập")
+            return "error", 30
 
-    # 2. Lấy CSRF token (tự động bypass Cloudflare nếu cần)
-    csrf = get_csrf_token()
-    if not csrf:
-        return "error", None
+    # 2. Kiểm tra Cooldown trên trang
+    if "Please wait" in r.text or "disabled" in r.text:
+        cd_match = re.search(r'Please wait (\d+)s', r.text) or re.search(r'(\d+)\s*(?:seconds|s|giây)', r.text)
+        if cd_match:
+            cd = int(cd_match.group(1))
+            log_warning(f"⏳ Đang trong thời gian Cooldown: còn {cd} giây.")
+            return "cooldown", cd
 
-    # 3. Giải reCAPTCHA
-    captcha = solve_recaptcha()
-    if not captcha:
-        return "error", None
+    # 3. Trích xuất CSRF Token & Captcha SiteKey
+    csrf_match = re.search(r'name="csrf_token" value="([a-f0-9]{64})"', r.text)
+    if not csrf_match:
+        log_error("  ❌ Không tìm thấy csrf_token trong trang /faucet/PEPE")
+        return "error", 30
 
-    # 4. Gửi request Claim
-    log_info("  [POST] Đang gửi yêu cầu claim...")
-    headers = {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'Origin': 'https://freepepecoin.com',
-        'Referer': 'https://freepepecoin.com/',
+    csrf_token = csrf_match.group(1)
+    log_info(f"  ✓ CSRF Token: {csrf_token[:16]}...")
+
+    # Sitekey
+    sitekey_match = re.search(r'data-sitekey="([^"]+)"', r.text)
+    sitekey = sitekey_match.group(1) if sitekey_match else "6LfNt2IsAAAAAPrj5FKMa9Wbn7I8SfkTsLTKLScQ"
+    is_v2 = "g-recaptcha" in r.text or "6LfNt2Is" in sitekey
+
+    # 4. Giải Captcha
+    log_info("  [2/4] Bắt đầu giải Captcha...")
+    captcha_token = solve_recaptcha(sitekey, is_v2=is_v2)
+    if not captcha_token:
+        return "captcha_failed", 5
+
+    # 5. Gửi Claim POST
+    log_info("  [3/4] Đang gửi yêu cầu nhận thưởng...")
+    post_data = {
+        "currency": "PEPE",
+        "csrf_token": csrf_token,
+        "g-recaptcha-response": captcha_token,
+        "claim": ""
     }
-    data = {
-        'csrf_token': csrf,
-        'g-recaptcha-response': captcha,
-        'email': EMAIL,
-        'claim': ''
-    }
+
     try:
-        resp = session.post("https://freepepecoin.com/", headers=headers, data=data, timeout=30, allow_redirects=True)
+        resp = session.post(
+            FAUCET_URL,
+            data=post_data,
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Origin": BASE_URL,
+                "Referer": FAUCET_URL
+            },
+            timeout=30,
+            allow_redirects=True
+        )
+
         log_info(f"  Response Status: {resp.status_code}")
 
-        if 'Captcha verification failed.' in resp.text:
-            log_error("  ⚠️  Captcha verification failed – sẽ thử lại với token mới.")
-            return "captcha_failed", None
+        if "Captcha verification failed" in resp.text:
+            log_error("  ⚠️ Captcha verification failed – sẽ thử lại lượt mới.")
+            return "captcha_failed", 5
 
-        success_keywords = ['successfully', 'claimed', 'reward', 'thank you', 'you received', 'congratulation']
-        if any(kw in resp.text.lower() for kw in success_keywords):
+        success_keywords = ['successfully', 'claimed', 'reward', 'thank you', 'you received', 'congratulation', 'satoshi', 'pepe']
+        if any(kw in resp.text.lower() for kw in success_keywords) and "danger" not in resp.text.lower():
             total_claims += 1
-            success_msg = f"🎉 CLAIM THÀNH CÔNG! Tổng số claims: {total_claims}"
-            log_success(success_msg)
+            log_success(f"🎉 CLAIM THÀNH CÔNG! Tổng số claims: {total_claims}")
 
             reward_match = re.search(r'(\d+\.?\d*)\s*PEPE', resp.text)
             if reward_match:
-                reward = float(reward_match.group(1))
-                log_success(f"  💰 Nhận thưởng: {reward} PEPE")
+                log_success(f"  💰 Phần thưởng nhận được: {reward_match.group(1)} PEPE")
 
             save_cookies()
             save_total_claims(total_claims)
 
-            cd_new, _ = check_cooldown()
-            if cd_new > 0:
-                return "success", cd_new
-            else:
-                return "success", 240
+            # Đọc cooldown mới
+            cd_match = re.search(r'Please wait (\d+)s', resp.text) or re.search(r'(\d+)\s*(?:seconds|s|giây)', resp.text)
+            cooldown = int(cd_match.group(1)) if cd_match else 240
+            return "success", cooldown
         else:
-            log_error("  ❌ Claim không thành công (không phát hiện dấu hiệu thành công)")
-            return "error", None
+            log_warning("  ⚠️ Phản hồi không có từ khóa thành công (có thể đang cooldown).")
+            cd_match = re.search(r'Please wait (\d+)s', resp.text)
+            cooldown = int(cd_match.group(1)) if cd_match else 60
+            return "success", cooldown
 
     except Exception as e:
-        log_error(f"  ❌ Lỗi khi gửi claim: {e}")
-        return "error", None
+        log_error(f"  ❌ Lỗi khi gửi POST Claim: {e}")
+        return "error", 30
 
 # ============= MAIN LOOP =============
 def main():
     log_info("\n" + "#"*60)
-    log_info("🚀 PEPE BOT & CAPTCHA SOLVER - CODESANDBOX RUNNER")
+    log_info("🚀 PEPE FAUCET BOT & CAPTCHA SOLVER - CODESANDBOX RUNNER")
     log_info(f"📧 Email cấu hình : {EMAIL}")
     log_info(f"🌐 Solver URL     : {SOLVER_URL}")
     log_info(f"📊 Số claims trước: {total_claims}")
@@ -447,11 +468,11 @@ def main():
         status, value = claim()
 
         if status == "cooldown":
-            log_info(f"😴 Tạm dừng {value} giây (đang trong thời gian cooldown)...")
+            log_info(f"😴 Đang trong Cooldown, nghỉ {value} giây...")
             time.sleep(value)
 
         elif status == "captcha_failed":
-            log_info("🔄 Thử lại sau 5 giây với captcha mới...")
+            log_info("🔄 Thử lại sau 5 giây với token Captcha mới...")
             time.sleep(5)
 
         elif status == "success":
@@ -460,7 +481,7 @@ def main():
             time.sleep(cooldown)
 
         else:
-            log_info("⏳ Gặp lỗi, thử lại sau 30 giây...")
+            log_info("⏳ Gặp lỗi tạm thời, thử lại sau 30 giây...")
             time.sleep(30)
 
 if __name__ == "__main__":
@@ -469,6 +490,6 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         log_info("\n👋 Bot đã được dừng bởi người dùng.")
     except Exception:
-        log_error("\n💥 NGOẠI LỆ KHÔNG XỬ LÝ ĐƯỢC:")
+        log_error("\n💥 NGOẠI LỆ:")
         traceback.print_exc()
         sys.exit(1)
