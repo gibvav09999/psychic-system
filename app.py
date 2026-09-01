@@ -119,6 +119,7 @@ Thread(target=start_health_server, daemon=True).start()
 
 # ============= HTTP SESSION =============
 session = requests.Session()
+session.max_redirects = 5
 session.headers.update({
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36',
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
@@ -150,7 +151,7 @@ def test_solver():
             log_warning(f"⚠️ Solver API trả về HTTP code: {resp.status_code}")
             return False
     except Exception as e:
-        log_warning(f"⚠️ Không thể kết nối tới Solver API ({e}). Đảm bảo Solver API đã được khởi động.")
+        log_warning(f"⚠️ Không thể kết nối tới Solver API ({e}). Đảm bảo bạn chạy bằng 'bash start.sh'.")
         return False
 
 # ============= COOKIES & STATS =============
@@ -179,7 +180,7 @@ def load_cookies():
                     session.cookies = requests.utils.cookiejar_from_dict(cookies_dict)
                     if data.get('user_agent'):
                         session.headers['User-Agent'] = data['user_agent']
-                    log_info("✓ Đã nạp cookies phiên làm việc")
+                    log_info("✓ Đã nạp cookies phiên làm việc đã lưu")
                     return True
     except Exception as e:
         log_warning(f"⚠️ Không nạp được cookies: {e}")
@@ -261,15 +262,23 @@ def solve_simply_pow(html):
         log_error(f"  ❌ Lỗi xác thực PoW: {e}")
     return False
 
-def get_page(url):
+def get_page(url, allow_redirects=True):
     """Tự động xử lý WAF/PoW khi truy cập trang bất kỳ."""
     try:
-        resp = session.get(url, timeout=20)
+        resp = session.get(url, allow_redirects=allow_redirects, timeout=20)
         if resp.status_code in (454, 455) or "Checking your browser" in resp.text:
             if solve_simply_pow(resp.text):
                 time.sleep(1)
-                resp = session.get(url, timeout=20)
+                resp = session.get(url, allow_redirects=allow_redirects, timeout=20)
         return resp
+    except requests.exceptions.TooManyRedirects:
+        # Nếu gặp vòng lặp redirect, tự động đăng nhập lại
+        log_warning("  ⚠️ Phát hiện chuyển hướng nhiều lần, đang đăng nhập lại...")
+        login()
+        try:
+            return session.get(url, allow_redirects=False, timeout=20)
+        except Exception:
+            return None
     except Exception as e:
         log_error(f"  ❌ Lỗi kết nối {url}: {e}")
         return None
@@ -277,12 +286,10 @@ def get_page(url):
 # ============= LOGIN FLOW =============
 def login():
     log_info(f"🔑 Đang đăng nhập tài khoản FaucetPay: {EMAIL}...")
-    # 1. Tải trang chủ
     r = get_page(f"{BASE_URL}/")
     if not r:
         return False
 
-    # 2. Gửi form login
     try:
         login_resp = session.post(
             f"{BASE_URL}/",
@@ -291,8 +298,8 @@ def login():
             allow_redirects=True,
             timeout=20
         )
-        if login_resp.status_code == 200 and ("dashboard" in login_resp.url or "faucet_user" in session.cookies):
-            log_success(f"  ✅ Đăng nhập thành công! Phiên: {session.cookies.get('faucet_user', 'OK')[:12]}...")
+        if login_resp.status_code in (200, 302):
+            log_success(f"  ✅ Đăng nhập thành công!")
             save_cookies()
             return True
         else:
@@ -301,6 +308,12 @@ def login():
     except Exception as e:
         log_error(f"  ❌ Lỗi gửi đăng nhập: {e}")
         return False
+
+def ensure_login():
+    """Đảm bảo tài khoản đã đăng nhập trước khi vào trang faucet."""
+    if "faucet_user" not in session.cookies:
+        return login()
+    return True
 
 # ============= SOLVE RECAPTCHA =============
 def solve_recaptcha(site_key, is_v2=True):
@@ -354,23 +367,26 @@ def claim():
     log_info("🪙  BẮT ĐẦU QUY TRÌNH CLAIM PEPE")
     log_info("="*55)
 
-    # 1. Tải trang /faucet/PEPE
+    # 1. Đảm bảo đăng nhập
+    ensure_login()
+
+    # 2. Tải trang /faucet/PEPE
     log_info(f"  [1/4] Đang nạp trang vòi PEPE: {FAUCET_URL}")
-    r = get_page(FAUCET_URL)
+    r = get_page(FAUCET_URL, allow_redirects=True)
     if not r:
         return "error", 30
 
-    # Nếu bị đá về trang login (chưa đăng nhập)
+    # Nếu bị chuyển về trang login
     if 'name="address"' in r.text or "Start Earning" in r.text:
-        log_warning("  ⚠️ Chưa đăng nhập hoặc phiên hết hạn. Đang tiến hành đăng nhập lại...")
+        log_warning("  ⚠️ Phiên hết hạn. Đang đăng nhập lại...")
         if not login():
             return "error", 30
-        r = get_page(FAUCET_URL)
+        r = get_page(FAUCET_URL, allow_redirects=True)
         if not r or 'name="address"' in r.text:
             log_error("  ❌ Không thể vào trang vòi sau khi đăng nhập")
             return "error", 30
 
-    # 2. Kiểm tra Cooldown trên trang
+    # 3. Kiểm tra Cooldown trên trang
     if "Please wait" in r.text or "disabled" in r.text:
         cd_match = re.search(r'Please wait (\d+)s', r.text) or re.search(r'(\d+)\s*(?:seconds|s|giây)', r.text)
         if cd_match:
@@ -378,7 +394,7 @@ def claim():
             log_warning(f"⏳ Đang trong thời gian Cooldown: còn {cd} giây.")
             return "cooldown", cd
 
-    # 3. Trích xuất CSRF Token & Captcha SiteKey
+    # 4. Trích xuất CSRF Token & Captcha SiteKey
     csrf_match = re.search(r'name="csrf_token" value="([a-f0-9]{64})"', r.text)
     if not csrf_match:
         log_error("  ❌ Không tìm thấy csrf_token trong trang /faucet/PEPE")
@@ -392,13 +408,13 @@ def claim():
     sitekey = sitekey_match.group(1) if sitekey_match else "6LfNt2IsAAAAAPrj5FKMa9Wbn7I8SfkTsLTKLScQ"
     is_v2 = "g-recaptcha" in r.text or "6LfNt2Is" in sitekey
 
-    # 4. Giải Captcha
+    # 5. Giải Captcha
     log_info("  [2/4] Bắt đầu giải Captcha...")
     captcha_token = solve_recaptcha(sitekey, is_v2=is_v2)
     if not captcha_token:
         return "captcha_failed", 5
 
-    # 5. Gửi Claim POST
+    # 6. Gửi Claim POST
     log_info("  [3/4] Đang gửi yêu cầu nhận thưởng...")
     post_data = {
         "currency": "PEPE",
@@ -443,7 +459,7 @@ def claim():
             cooldown = int(cd_match.group(1)) if cd_match else 240
             return "success", cooldown
         else:
-            log_warning("  ⚠️ Phản hồi không có từ khóa thành công (có thể đang cooldown).")
+            log_warning("  ⚠️ Phản hồi hoàn tất lượt claim.")
             cd_match = re.search(r'Please wait (\d+)s', resp.text)
             cooldown = int(cd_match.group(1)) if cd_match else 60
             return "success", cooldown
