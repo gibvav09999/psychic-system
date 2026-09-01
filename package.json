@@ -4,7 +4,7 @@
   "description": "Captcha Solver API & Auto Claim Bot for CodeSandbox",
   "main": "app.py",
   "scripts": {
-    "setup": "pip install -r requirements.txt && cd Api && npm install",
+    "setup": "bash start.sh",
     "start": "bash start.sh",
     "start:all": "bash start.sh",
     "solver": "cd Api && node Api.js",
